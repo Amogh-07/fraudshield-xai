@@ -1,0 +1,12 @@
+{
+  "auc_roc": 0.9840882699896131,
+  "pr_auc": 0.9145074999555941,
+  "accuracy": 0.9997269145242461,
+  "fraud_recall": 0.8651685393258427,
+  "fraud_precision": 0.9746835443037974,
+  "fraud_rate_test": 0.001736043381578434,
+  "threshold": 0.9422804117202759,
+  "feedback_rows": 3,
+  "tolerance": 0.005,
+  "accepted": true
+}

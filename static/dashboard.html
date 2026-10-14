@@ -1,0 +1,86 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FraudShield XAI — Analyst Dashboard</title>
+<style>
+  :root{--bg:#0f1218;--card:#181d27;--tx:#e6e9ef;--mu:#8a93a5;--red:#ef5350;--blue:#42a5f5;--ok:#66bb6a;--bd:#262d3b}
+  @media(prefers-color-scheme:light){:root{--bg:#f4f6fa;--card:#fff;--tx:#161a22;--mu:#667085;--bd:#dde2ec}}
+  *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px system-ui,sans-serif;padding:16px}
+  h1{font-size:18px;margin:0 0 12px}.grid{display:grid;grid-template-columns:1.2fr 1fr;gap:14px}@media(max-width:800px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;overflow-x:auto}
+  .stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;align-items:center}.stat{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:8px 12px}
+  .stat b{display:block;font-size:16px}.mu{color:var(--mu);font-size:12px}
+  table{width:100%;border-collapse:collapse}td,th{padding:6px;text-align:left;border-bottom:1px solid var(--bd)}tr.f{cursor:pointer}tr.sel{outline:1px solid var(--blue)}
+  th{position:sticky;top:0;background:var(--card)}
+  .pill{padding:2px 8px;border-radius:99px;font-size:12px}.p1{background:#ef535033;color:var(--red)}.p0{background:#66bb6a33;color:var(--ok)}
+  .row{display:grid;grid-template-columns:110px 1fr 60px;gap:8px;align-items:center;margin:5px 0}.track{position:relative;height:16px;background:var(--bd);border-radius:3px}
+  .bar{position:absolute;top:0;bottom:0;border-radius:3px}button{background:var(--bd);color:var(--tx);border:0;padding:6px 10px;border-radius:6px;cursor:pointer;margin-right:6px}
+  button.bad{background:var(--red);color:#fff}button.good{background:var(--ok);color:#fff}
+  .bar-tools{margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px 0;align-items:center}
+  .bar-tools span{margin-left:10px}
+</style></head><body>
+  <h1>FraudShield XAI — Analyst Dashboard</h1>
+  <div class="stats" id="stats"></div>
+<div class="bar-tools">
+  <button id="pause" onclick="togglePause()">Pause feed</button>
+  <button id="flag" onclick="toggleFlag()">Flagged only</button>
+  <button onclick="simDrift()">Simulate drift</button>
+  <button onclick="retrain(false)">Retrain on feedback</button>
+  <button onclick="retrain(true)" title="Forces the guard to reject the new model, to demo it">Test retrain guard</button>
+  <span id="driftmsg" class="mu"></span><span id="retrainmsg" class="mu"></span>
+</div>
+<div class="grid">
+  <div class="card" style="max-height:80vh;overflow-y:auto"><table><thead><tr><th>ID</th><th>Amount</th><th title="Uncalibrated model score, not a probability">Fraud Score</th><th>Decision</th><th>ms</th><th>Label</th></tr></thead><tbody id="feed"></tbody></table></div>
+  <div class="card" id="detail"><span class="mu">Select a flagged transaction to see its SHAP waterfall.</span></div>
+</div>
+<script>
+let sel=null,paused=false,flagOnly=false,poller=null;
+const $=s=>document.querySelector(s);
+const sig=x=>1/(1+Math.exp(-x));
+const f=x=>x==null?'—':x;
+async function j(u,o){try{const r=await fetch(u,o);if(!r.ok)return{error:'HTTP '+r.status};return await r.json()}catch(e){return{error:String(e)}}}
+async function tick(){await j('/simulate',{method:'POST'});await refresh()}
+async function refresh(){
+  const [tx,st]=await Promise.all([j('/transactions?n=200'),j('/status')]);
+  if(tx.error||st.error)return;
+  const L=st.latency;
+  $('#stats').innerHTML=[['Threshold',st.threshold.toFixed(3)],['Test AUC-ROC',st.metrics.auc_roc.toFixed(4)],['Fraud recall',(st.metrics.fraud_recall*100).toFixed(1)+'%'],
+   ['Fraud precision',(st.metrics.fraud_precision*100).toFixed(1)+'%'],['Queued labels',st.queued_labels],['Drift events',st.drift_events+(st.retrain_recommended?' — retrain advised':'')],
+   ['Model latency p50 / p95',`${f(L.model_p50)} / ${f(L.model_p95)} ms`],['Total incl. SHAP p50 / p95',`${f(L.total_p50)} / ${f(L.total_p95)} ms`],
+   ['Stored transactions',st.history],['Merchant reports',st.merchant_reports]]
+   .map(([a,b])=>`<div class="stat"><span class="mu">${a}</span><b>${b}</b></div>`).join('');
+  $('#feed').innerHTML=(flagOnly?tx.filter(t=>t.flagged):tx).map(t=>`<tr class="f ${t.id===sel?'sel':''}" onclick="show('${t.id}')"><td>${t.id}</td><td>${(t.amount||0).toFixed(2)}</td><td>${t.prob.toFixed(3)}</td>
+   <td><span class="pill p${+t.flagged}">${t.flagged?'FLAGGED':'OK'}</span></td><td>${t.latency_ms}</td><td>${t.label===null?'—':t.label?'fraud':'legit'}</td></tr>`).join('')}
+async function show(id){
+  sel=id;const e=await j('/explain/'+id);if(e.error)return;
+  let c=e.base;const steps=e.contributions.map(x=>{const s=c;c+=x.shap;return{...x,s,e:c}});
+  if(Math.abs(e.other)>1e-6){const s=c;c+=e.other;steps.push({feature:'other features',value:'',shap:e.other,s,e:c})}
+  const all=[e.base,...steps.map(x=>x.e)],lo=Math.min(...all),hi=Math.max(...all),w=hi-lo||1,pos=v=>(v-lo)/w*100;
+  $('#detail').innerHTML=`<b>Transaction ${id}</b><div class="mu">Base ${e.base.toFixed(2)} → final log-odds ${c.toFixed(2)} (score ${sig(c).toFixed(3)})</div>`+
+   steps.map(x=>{const a=pos(Math.min(x.s,x.e)),b=pos(Math.max(x.s,x.e));return`<div class="row"><span title="value ${x.value}">${x.feature}</span><div class="track"><div class="bar" style="left:${a}%;width:${Math.max(b-a,.8)}%;background:var(--${x.shap>0?'red':'blue'})"></div></div><span class="mu">${x.shap>0?'+':''}${x.shap.toFixed(2)}</span></div>`}).join('')+
+   `<p><button class="bad" onclick="fb('${id}',1)">Confirm fraud</button><button class="good" onclick="fb('${id}',0)">Mark legit</button></p>`;refresh()}
+async function fb(id,l){await j('/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,label:l})});refresh()}
+async function retrain(force){
+  const r=await j('/retrain'+(force?'?force_reject=true':''),{method:'POST'});
+  if(r.error){$('#retrainmsg').textContent=' could not start retrain: '+r.error;return}
+  if(!r.started){$('#retrainmsg').textContent=' '+r.reason;return}
+  pollRetrain()}
+function pollRetrain(){
+  $('#retrainmsg').textContent=' retraining in background… (dashboard keeps running)';
+  if(poller)clearInterval(poller);
+  poller=setInterval(async()=>{
+    const s=await j('/retrain/status');if(s.error||s.running)return;
+    clearInterval(poller);poller=null;const r=s.result||{};
+    $('#retrainmsg').textContent=r.error?' retrain failed: '+r.error:
+      r.accepted?` new model accepted (PR-AUC ${r.pr_auc.toFixed(4)}, ${r.feedback_rows} labels used)`:
+      ` new model REJECTED by guard: PR-AUC ${r.pr_auc.toFixed(4)} vs previous ${r.previous_pr_auc.toFixed(4)}${r.tolerance<0?' (forced test)':''}`;
+    refresh()},2000)}
+async function simDrift(){
+  $('#driftmsg').textContent=' running…';
+  const r=await j('/simulate-drift?n=500',{method:'POST'});
+  if(r.error){$('#driftmsg').textContent=' failed: '+r.error;return}
+  $('#driftmsg').textContent=` error ${(r.error_rate_normal*100).toFixed(1)}% → ${(r.error_rate_drifted*100).toFixed(1)}%, drift ${r.detected_after===null?'NOT detected':'detected after '+r.detected_after+' labels'}, false alarms: ${r.false_alarms_before_drift}`;
+  refresh()}
+function togglePause(){paused=!paused;$('#pause').textContent=paused?'Resume feed':'Pause feed'}
+function toggleFlag(){flagOnly=!flagOnly;$('#flag').textContent=flagOnly?'Show all':'Flagged only';refresh()}
+j('/retrain/status').then(s=>{if(s.running)pollRetrain()});
+refresh();setInterval(()=>{if(!paused)tick()},3000);
+</script></body></html>
